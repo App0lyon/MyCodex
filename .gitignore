@@ -1,0 +1,48 @@
+﻿# Global ignores
+.DS_Store
+Thumbs.db
+
+# Python / virtualenv
+__pycache__/
+*.pyc
+.venv/
+env/
+venv/
+.pytest_cache/
+.python-version
+
+# FastAPI / local settings
+.coverage
+.mypy_cache/
+
+# Node / VS Code extension
+node_modules/
+dist/
+out/
+*.vsix
+*.tsbuildinfo
+/.vscode-test/
+
+# Editor / workspace
+.vscode/
+.idea/
+*.log
+
+# System trash / temp files
+*.tmp
+*.temp
+*.bak
+*.orig
+*.swp
+*.swo
+*~
+ehthumbs.db
+Desktop.ini
+.Trash-*
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+
+# Local env / secrets
+.env
+.env.*

@@ -1,0 +1,7 @@
+tiktoken
+streamlit
+requests
+fastapi
+uvicorn
+pandas
+matplotlib
