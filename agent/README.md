@@ -1,12 +1,12 @@
 Architecture
 ------------
-- Planner (llama3.1:8b) -> genere une liste de sous-taches JSON.
+- Prompt Optimizer (gemma3:4b) -> re-ecrit un prompt pour maximiser la qualite des reponses LLM.
+- Planner (qwen2.5) -> genere une liste de sous-taches JSON.
 - Task Queue -> ordonnance les taches en respectant les dependances.
 - Executor (codellama:13b) -> implemente chaque tache.
 - Task Reviewer (qwen2.5) -> relit chaque tache et remonte problemes/recommandations sur le code genere.
 - Self-Correction (codellama:13b) -> applique automatiquement les recommandations du critic sur le code produit.
 - Final Critic (qwen2.5) -> produit une revue globale apres generation.
-- Prompt Optimizer (gemma3:4b) -> re-ecrit un prompt pour maximiser la qualite des reponses LLM.
 - Memory module -> conserve un historique court/long terme des runs pour enrichir le contexte automatiquement.
 
 Pipeline optimise
