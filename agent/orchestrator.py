@@ -160,7 +160,12 @@ class Orchestrator:
             context_used = response_context
 
         self._log(f"[Planner] Goal: {goal}")
-        tasks = self.planner.plan(goal=goal, context=context_used, scenario_id=scenario_label)
+        tasks = self.planner.plan(
+            goal=goal,
+            context=context_used,
+            constraints=constraints,
+            scenario_id=scenario_label,
+        )
         self._log(f"[Planner] {len(tasks)} task(s) generated.")
         tasks_by_id: Dict[int, Task] = {task.id: task for task in tasks}
         remaining_ids: Set[int] = set(tasks_by_id.keys())
@@ -230,6 +235,7 @@ class Orchestrator:
             scenario_id=scenario_label,
         )
         self._log(f"[Critic] Score initial {initial_feedback.score}")
+        baseline_feedback = initial_feedback.raw or initial_feedback.__dict__
 
         results_corrected = results
         corrections_applied = False
@@ -257,6 +263,7 @@ class Orchestrator:
                 constraints=constraints,
                 task_results=results_corrected,
                 unresolved_tasks=unresolved,
+                baseline_feedback=baseline_feedback,
                 scenario_id=scenario_label,
             )
         )
@@ -317,6 +324,7 @@ class Orchestrator:
         exec_output = self.executor.execute(
             task=task,
             project_context=context,
+            existing_code=context,
             constraints=constraints,
             scenario_id=scenario_id,
         )

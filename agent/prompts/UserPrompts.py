@@ -5,7 +5,11 @@ Objectif global :
 Contexte technique (si disponible) :
 {{CONTEXT}}
 
+Contraintes supplementaires (si disponibles) :
+{{CONSTRAINTS}}
+
 Genere une liste ordonnee de sous-taches necessaires pour atteindre l'objectif.
+Base la decomposition sur le contexte et les contraintes lorsqu'ils apportent des precisions sur le perimetre ou les dependances.
 Si l'objectif peut etre resolu par UNE fonction, genere EXACTEMENT UNE tache.
 
 Chaque tache doit contenir :
@@ -35,6 +39,7 @@ Contraintes supplementaires :
 
 Instructions :
 - Implemente la tache.
+- Si "Code existant" est fourni, conserve tout le code non concerne intact, modifie uniquement ce qui est demande et reutilise le meme chemin de fichier.
 - Si du code est requis, fournis-le dans `files` avec le contenu COMPLET des fichiers.
 - Si aucun fichier n'est fourni, la reponse sera consideree comme un ECHEC.
 - Si aucun code n'est requis, indique-le clairement dans `notes` et retourne `status: failure`.
@@ -97,6 +102,9 @@ Taches executees :
 
 Taches non resolues :
 {{UNRESOLVED_TASKS}}
+
+Critique precedente (si disponible) :
+{{BASELINE_FEEDBACK}}
 
 Fournis une critique FINALE (une seule fois) sur l'ensemble du resultat genere.
 Donne un score global sur 100, la liste des problemes observes et des recommandations concretes.

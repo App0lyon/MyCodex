@@ -14,12 +14,13 @@ class Planner:
         self.client = client
         self.model = model
 
-    def plan(self, goal: str, context: str = "", scenario_id: str | None = None) -> List[Task]:
+    def plan(self, goal: str, context: str = "", constraints: str = "", scenario_id: str | None = None) -> List[Task]:
         user_prompt = render(
             UserPrompts.PLANNER,
             {
                 "GOAL": goal,
                 "CONTEXT": context or "",
+                "CONSTRAINTS": constraints or "",
             },
         )
 

@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from clients.ollama_client import OllamaClient
 from models.tasks import CriticFeedback, parse_critic_feedback
@@ -20,8 +20,21 @@ class Critic:
         constraints: str,
         task_results: List[Dict[str, object]],
         unresolved_tasks: List[Dict[str, object]],
+        baseline_feedback: Optional[Union[CriticFeedback, Dict[str, object]]] = None,
         scenario_id: str | None = None,
     ) -> CriticFeedback:
+        baseline_payload_text = ""
+        if baseline_feedback:
+            payload: Dict[str, object] = {}
+            if isinstance(baseline_feedback, CriticFeedback):
+                payload = baseline_feedback.raw or baseline_feedback.__dict__
+            elif isinstance(baseline_feedback, dict):
+                payload = baseline_feedback
+            try:
+                baseline_payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
+            except Exception:
+                baseline_payload_text = ""
+
         user_prompt = render(
             UserPrompts.CRITIC,
             {
@@ -30,6 +43,7 @@ class Critic:
                 "CONSTRAINTS": constraints,
                 "TASK_RESULTS": json.dumps(task_results, ensure_ascii=False, indent=2),
                 "UNRESOLVED_TASKS": json.dumps(unresolved_tasks, ensure_ascii=False, indent=2),
+                "BASELINE_FEEDBACK": baseline_payload_text,
             },
         )
 
