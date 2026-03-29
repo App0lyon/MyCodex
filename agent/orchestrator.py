@@ -9,11 +9,14 @@ from agents.prompt_optimizer import PromptOptimizer
 from agents.responder import Responder
 from agents.searcher import Searcher
 from agents.self_correction import SelfCorrection
+from clients.nvidia_build_client import NvidiaBuildClient
 from clients.ollama_client import OllamaClient
 from clients.search_client import WebSearchClient
 from models.tasks import CriticFeedback, ExecutionOutput, FileEdit, Task, TaskReview, parse_task_review
 from utils.cost_logger import CostLogger
 from utils.memory import MemoryStore
+from utils.workspace_context import WorkspaceContextBuilder
+from utils.workspace_patcher import WorkspacePatchApplier
 
 
 def _serialize_execution_output(output: ExecutionOutput) -> Dict[str, object]:
@@ -48,7 +51,10 @@ def _serialize_review(review: TaskReview | None) -> Dict[str, object] | None:
 class Orchestrator:
     def __init__(
         self,
+        provider: str = "ollama",
         ollama_base_url: str = "http://localhost:11434",
+        nvidia_api_key: str | None = None,
+        nvidia_base_url: str = "https://integrate.api.nvidia.com/v1",
         planner_model: str = "llama3.1:8b",
         executor_model: str = "codellama:13b",
         critic_model: str = "qwen2.5",
@@ -66,13 +72,23 @@ class Orchestrator:
         costs_path: str = "costs.csv",
         ollama_timeout: int = 300,
     ) -> None:
+        self.provider = (provider or "ollama").strip().lower() or "ollama"
         self.cost_logger = CostLogger(path=costs_path)
-        client = OllamaClient(
-            base_url=ollama_base_url,
-            timeout=ollama_timeout,
-            cost_logger=self.cost_logger,
-            costs_path=costs_path,
-        )
+        if self.provider == "nvidia":
+            client = NvidiaBuildClient(
+                api_key=nvidia_api_key or "",
+                base_url=nvidia_base_url,
+                timeout=ollama_timeout,
+                cost_logger=self.cost_logger,
+                costs_path=costs_path,
+            )
+        else:
+            client = OllamaClient(
+                base_url=ollama_base_url,
+                timeout=ollama_timeout,
+                cost_logger=self.cost_logger,
+                costs_path=costs_path,
+            )
         self.client = client
         self.planner = Planner(client=client, model=planner_model)
         self.executor = Executor(client=client, model=executor_model)
@@ -86,7 +102,7 @@ class Orchestrator:
         self.verbose = verbose
         self.memory_enabled = memory_enabled
         self.memory = memory_store or (MemoryStore() if memory_enabled else None)
-        self.searcher = Searcher(client=WebSearchClient(timeout=search_timeout)) if enable_search else None
+        self.searcher = Searcher(client=WebSearchClient(timeout=search_timeout))
         self.current_scenario_id = "unknown"
 
     def run(
@@ -100,6 +116,8 @@ class Orchestrator:
         enable_search: bool = False,
         search_query: str | None = None,
         search_results_limit: int = 5,
+        workspace_root: str | None = None,
+        apply_changes: bool = False,
         scenario_id: Optional[str] = None,
     ) -> Dict[str, object]:
         scenario_label = self._normalize_scenario_id(scenario_id or conversation_id)
@@ -127,6 +145,38 @@ class Orchestrator:
 
         response_context = context_with_history
         search_results: list[dict] = []
+        workspace_context = ""
+        workspace_root_used = ""
+        workspace_helper: WorkspaceContextBuilder | None = None
+        workspace_applier: WorkspacePatchApplier | None = None
+        applied_files: list[str] = []
+        apply_errors: list[str] = []
+        applied_seen: Set[str] = set()
+
+        if workspace_root:
+            try:
+                workspace_helper = WorkspaceContextBuilder(workspace_root)
+                if workspace_helper.is_available:
+                    workspace_root_used = str(workspace_helper.root)
+                    if apply_changes:
+                        workspace_applier = WorkspacePatchApplier(workspace_root_used)
+                    workspace_context = workspace_helper.build_context(
+                        query="\n".join(part for part in [goal, base_context, constraints] if part),
+                        limit=5,
+                        include_overview=True,
+                    )
+                    if workspace_context:
+                        context_used = "\n\n".join(
+                            part for part in [context_used, f"Contexte du workspace local:\n{workspace_context}"] if part
+                        ).strip()
+                        response_context = "\n\n".join(
+                            part for part in [response_context, f"Contexte du workspace local:\n{workspace_context}"] if part
+                        ).strip()
+                else:
+                    workspace_helper = None
+            except Exception as exc:  # pragma: no cover - defensive
+                self._log(f"[Workspace] Echec indexation workspace: {exc}")
+                workspace_helper = None
 
         if enable_search and self.searcher:
             search_text = search_query or goal
@@ -142,6 +192,7 @@ class Orchestrator:
 
         if use_memory and self.memory_enabled and self.memory:
             try:
+                context_before_memory = context_used
                 context_used, memory_context, memory_entries = self.memory.build_context(
                     goal=goal,
                     context=context_used,
@@ -153,7 +204,7 @@ class Orchestrator:
                     self._log(f"[Memory] {len(memory_entries)} rappel(s) ajoutes au contexte.")
             except Exception as exc:  # pragma: no cover - defensive
                 self._log(f"[Memory] Echec enrichissement contexte: {exc}")
-                context_used = base_context
+                context_used = context_before_memory
                 memory_context = ""
         else:
             # Pas de memoire active -> ne pas polluer la reponse finale avec des traces de memoire.
@@ -171,6 +222,7 @@ class Orchestrator:
         remaining_ids: Set[int] = set(tasks_by_id.keys())
         completed: Set[int] = set()
         results: List[Dict[str, object]] = []
+        results_by_task_id: Dict[int, Dict[str, object]] = {}
         futures: Dict[concurrent.futures.Future, int] = {}
 
         def ready_ids() -> List[int]:
@@ -180,16 +232,100 @@ class Orchestrator:
                 if set(tasks_by_id[tid].dependencies or []).issubset(completed)
             ]
 
+        def build_existing_code(task: Task) -> str:
+            visited: Set[int] = set()
+            ordered: List[int] = []
+
+            def visit(task_id: int) -> None:
+                if task_id in visited:
+                    return
+                visited.add(task_id)
+                upstream = tasks_by_id.get(task_id)
+                if upstream is None:
+                    return
+                for dep_id in upstream.dependencies or []:
+                    visit(dep_id)
+                ordered.append(task_id)
+
+            for dep_id in task.dependencies or []:
+                visit(dep_id)
+
+            file_blocks: List[str] = []
+            for dep_id in ordered:
+                result = results_by_task_id.get(dep_id) or {}
+                execution = result.get("execution") if isinstance(result, dict) else {}
+                files = execution.get("files", []) if isinstance(execution, dict) else []
+                for file_data in files:
+                    if not isinstance(file_data, dict):
+                        continue
+                    path = str(file_data.get("path", "")).strip()
+                    content = str(file_data.get("content", ""))
+                    if not (path or content):
+                        continue
+                    label = path or f"task_{dep_id}_output"
+                    file_blocks.append(f"{label}:\n```text\n{content}\n```")
+
+            return "\n\n".join(file_blocks).strip()
+
+        def build_task_context(task: Task) -> str:
+            if not workspace_helper:
+                return context_used
+            try:
+                task_workspace_context = workspace_helper.build_context(
+                    query="\n".join(
+                        part
+                        for part in [goal, task.title, task.description, task.input, task.output, constraints]
+                        if part
+                    ),
+                    limit=4,
+                    include_overview=False,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                self._log(f"[Workspace] Echec recherche locale tache {task.id}: {exc}")
+                task_workspace_context = ""
+            return "\n\n".join(
+                part
+                for part in [context_used, f"Fichiers workspace pertinents pour la tache:\n{task_workspace_context}" if task_workspace_context else ""]
+                if part
+            ).strip()
+
+        def build_targeted_files(task: Task) -> List[FileEdit]:
+            if not workspace_helper:
+                return []
+            try:
+                targeted = workspace_helper.collect_targeted_files(
+                    query="\n".join(
+                        part
+                        for part in [goal, task.title, task.description, task.input, task.output, constraints]
+                        if part
+                    ),
+                    limit=3,
+                    max_file_chars=12000,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                self._log(f"[Workspace] Echec lecture ciblee tache {task.id}: {exc}")
+                return []
+            return [
+                FileEdit(path=str(item.get("path", "")).strip(), content=str(item.get("content", "")))
+                for item in targeted
+                if isinstance(item, dict) and str(item.get("path", "")).strip()
+            ]
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             while remaining_ids or futures:
                 for tid in ready_ids():
                     if len(futures) >= self.max_workers:
                         break
                     task = tasks_by_id[tid]
+                    task_context = build_task_context(task)
+                    targeted_files = build_targeted_files(task)
+                    existing_code = build_existing_code(task)
                     future = pool.submit(
                         self._run_single_task,
                         task,
-                        context_used,
+                        task_context,
+                        targeted_files,
+                        existing_code,
                         constraints,
                         scenario_label,
                     )
@@ -220,7 +356,15 @@ class Orchestrator:
                             },
                         }
 
+                    if workspace_applier:
+                        result, applied_now, errors_now = self._apply_result_to_workspace(result, workspace_applier)
+                        for path in applied_now:
+                            if path not in applied_seen:
+                                applied_seen.add(path)
+                                applied_files.append(path)
+                        apply_errors.extend(errors_now)
                     results.append(result)
+                    results_by_task_id[task_id] = result
                     completed.add(task_id)
 
         results.sort(key=lambda item: item.get("task", {}).get("id", 0))
@@ -250,6 +394,17 @@ class Orchestrator:
                 )
                 if corrections_applied:
                     results_corrected.sort(key=lambda item: item.get("task", {}).get("id", 0))
+                    if workspace_applier:
+                        refreshed_results: List[Dict[str, object]] = []
+                        for item in results_corrected:
+                            updated_item, applied_now, errors_now = self._apply_result_to_workspace(item, workspace_applier)
+                            for path in applied_now:
+                                if path not in applied_seen:
+                                    applied_seen.add(path)
+                                    applied_files.append(path)
+                            apply_errors.extend(errors_now)
+                            refreshed_results.append(updated_item)
+                        results_corrected = refreshed_results
                     self._log("[SelfCorrection] Corrections appliquees suite aux recommandations du critic.")
             except Exception as exc:  # pragma: no cover - defensive
                 self._log(f"[SelfCorrection] Echec des corrections: {exc}")
@@ -303,6 +458,13 @@ class Orchestrator:
             "context": base_context,
             "context_used": context_used,
             "scenario_id": scenario_label,
+            "provider": self.provider,
+            "memory_active": bool(use_memory and self.memory_enabled and self.memory),
+            "workspace_root": workspace_root_used,
+            "workspace_context": workspace_context,
+            "applied_changes": bool(applied_files),
+            "applied_files": applied_files,
+            "apply_errors": apply_errors,
             "completed_tasks": len(completed),
             "tasks": results_corrected,
             "unresolved_tasks": unresolved,
@@ -319,12 +481,21 @@ class Orchestrator:
         optimized, raw = self.prompt_optimizer.optimize(prompt=prompt, context=context, scenario_id=scenario_label)
         return {"optimized_prompt": optimized, "raw": raw}
 
-    def _run_single_task(self, task: Task, context: str, constraints: str, scenario_id: str) -> Dict[str, object]:
+    def _run_single_task(
+        self,
+        task: Task,
+        context: str,
+        targeted_files: List[FileEdit],
+        existing_code: str,
+        constraints: str,
+        scenario_id: str,
+    ) -> Dict[str, object]:
         self._log(f"[Executor] Running task {task.id}: {task.title}")
         exec_output = self.executor.execute(
             task=task,
             project_context=context,
-            existing_code=context,
+            targeted_files=targeted_files,
+            existing_code=existing_code,
             constraints=constraints,
             scenario_id=scenario_id,
         )
@@ -399,6 +570,41 @@ class Orchestrator:
                 corrected_results.append(item)
 
         return corrected_results, changed
+
+    def _apply_result_to_workspace(
+        self,
+        result: Dict[str, object],
+        workspace_applier: WorkspacePatchApplier,
+    ) -> tuple[Dict[str, object], list[str], list[str]]:
+        execution_data = result.get("execution")
+        if not isinstance(execution_data, dict):
+            return result, [], []
+
+        files_data = execution_data.get("files", [])
+        files = [
+            FileEdit(path=str(item.get("path", "")).strip(), content=str(item.get("content", "")))
+            for item in files_data
+            if isinstance(item, dict) and str(item.get("path", "")).strip()
+        ]
+        if not files:
+            return result, [], []
+
+        outcome = workspace_applier.apply_edits(files)
+        if outcome.normalized_files:
+            execution_data["files"] = [{"path": item.path, "content": item.content} for item in outcome.normalized_files]
+
+        notes: List[str] = []
+        current_notes = str(execution_data.get("notes", "") or "").strip()
+        if current_notes:
+            notes.append(current_notes)
+        if outcome.applied_files:
+            notes.append(f"Patch applique sur disque ({len(outcome.applied_files)} fichier(s)).")
+        if outcome.errors:
+            notes.append("Erreurs patch disque: " + "; ".join(outcome.errors))
+            if not outcome.normalized_files:
+                execution_data["status"] = "failure"
+        execution_data["notes"] = " | ".join(notes)
+        return result, outcome.applied_files, outcome.errors
 
     def _build_final_response(
         self,

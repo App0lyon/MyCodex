@@ -82,7 +82,7 @@ class SelfCorrection:
             return files
 
         pattern_with_path = re.compile(
-            r"(?P<path>[\\w./-]+):\\s*```[a-zA-Z0-9]*\\s*(?P<code>[\\s\\S]*?)```",
+            r"(?P<path>[\w./-]+):\s*```[a-zA-Z0-9]*\s*(?P<code>[\s\S]*?)```",
             re.MULTILINE,
         )
         for match in pattern_with_path.finditer(text):
@@ -93,7 +93,7 @@ class SelfCorrection:
         if files:
             return files
 
-        generic_block = re.search(r"```[a-zA-Z0-9]*\\s*([\\s\\S]*?)```", text)
+        generic_block = re.search(r"```[a-zA-Z0-9]*\s*([\s\S]*?)```", text)
         if generic_block:
             files.append(FileEdit(path="self_correction_output.py", content=generic_block.group(1)))
 

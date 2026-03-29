@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { callBackend, deleteMemoryEntry, fetchMemoryEntries } from '../backend';
+import { callBackend } from '../backend';
 import { isUriInsideWorkspace } from '../utils/workspace';
 
 export function createMessageHandler(webview: vscode.Webview) {
@@ -12,43 +12,19 @@ export function createMessageHandler(webview: vscode.Webview) {
 			const sessionId = message.sessionId ? String(message.sessionId) : undefined;
 			const enableSearch = Boolean(message.enableSearch);
 			const enableOptimize = message.enableOptimize !== false;
+			const useMemory = message.useMemory !== false;
+			const provider = message.provider === 'nvidia' ? 'nvidia' : 'ollama';
 			if (!prompt.trim()) {
 				webview.postMessage({ type: 'response', ok: false, data: 'Le prompt est vide.' });
 				return;
 			}
 
 			try {
-				const result = await callBackend(prompt, context, history, sessionId, enableSearch, enableOptimize);
+				const result = await callBackend(prompt, context, history, sessionId, enableSearch, enableOptimize, useMemory, provider);
 				webview.postMessage({ type: 'response', ok: true, data: result });
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : 'Erreur inconnue.';
 				webview.postMessage({ type: 'response', ok: false, data: msg });
-			}
-			return;
-		}
-
-		if (message?.type === 'loadHistory') {
-			try {
-				const entries = await fetchMemoryEntries();
-				webview.postMessage({ type: 'history', ok: true, data: entries });
-			} catch (err: unknown) {
-				const msg = err instanceof Error ? err.message : 'Erreur inconnue.';
-				webview.postMessage({ type: 'history', ok: false, data: msg });
-			}
-			return;
-		}
-
-		if (message?.type === 'deleteMemoryEntry') {
-			try {
-				const id = String(message.id ?? '');
-				if (!id) {
-					throw new Error('Identifiant manquant.');
-				}
-				await deleteMemoryEntry(id);
-				webview.postMessage({ type: 'deleteMemoryEntry', ok: true, id });
-			} catch (err: unknown) {
-				const msg = err instanceof Error ? err.message : 'Erreur inconnue.';
-				webview.postMessage({ type: 'deleteMemoryEntry', ok: false, data: msg, id: message?.id });
 			}
 			return;
 		}

@@ -17,15 +17,20 @@ class Executor:
         self,
         task: Task,
         project_context: str = "",
+        targeted_files: Optional[List[FileEdit]] = None,
         existing_code: Optional[str] = "",
         constraints: Optional[str] = "",
         scenario_id: str | None = None,
     ) -> ExecutionOutput:
+        targeted_blocks = []
+        for file_edit in targeted_files or []:
+            targeted_blocks.append(f"{file_edit.path}:\n```text\n{file_edit.content}\n```")
         user_prompt = render(
             UserPrompts.EXECUTOR,
             {
                 "TASK_JSON": json.dumps(task.__dict__, ensure_ascii=False, indent=2),
                 "PROJECT_CONTEXT": project_context or "",
+                "TARGETED_FILES": "\n\n".join(targeted_blocks) if targeted_blocks else "Aucun fichier cible trouve.",
                 "EXISTING_CODE": existing_code or "",
                 "CONSTRAINTS": constraints or "",
             },

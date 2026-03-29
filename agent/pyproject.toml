@@ -1,0 +1,26 @@
+[project]
+name = "mycodex-agent"
+version = "0.1.0"
+description = "Backend agentique local pour MyCodex"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110,<1",
+    "matplotlib>=3.8,<4",
+    "pandas>=2.2,<3",
+    "requests>=2.31,<3",
+    "streamlit>=1.33,<2",
+    "tiktoken>=0.7,<1",
+    "uvicorn>=0.29,<1",
+]
+
+[dependency-groups]
+test = [
+    "pytest>=8.3,<9",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

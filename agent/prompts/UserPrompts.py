@@ -10,6 +10,8 @@ Contraintes supplementaires (si disponibles) :
 
 Genere une liste ordonnee de sous-taches necessaires pour atteindre l'objectif.
 Base la decomposition sur le contexte et les contraintes lorsqu'ils apportent des precisions sur le perimetre ou les dependances.
+Le contexte peut contenir une vue du workspace local, des chemins de fichiers et des extraits de code trouves par recherche locale.
+Utilise ces indices pour cibler les vrais fichiers/modules du projet.
 Si l'objectif peut etre resolu par UNE fonction, genere EXACTEMENT UNE tache.
 
 Chaque tache doit contenir :
@@ -31,6 +33,9 @@ Tache a executer :
 Contexte du projet :
 {{PROJECT_CONTEXT}}
 
+Fichiers existants cibles (contenu complet si trouves) :
+{{TARGETED_FILES}}
+
 Code existant (si applicable) :
 {{EXISTING_CODE}}
 
@@ -39,6 +44,9 @@ Contraintes supplementaires :
 
 Instructions :
 - Implemente la tache.
+- Le contexte du projet peut inclure un snapshot du workspace local et des fichiers trouves par recherche locale.
+- Si des "Fichiers existants cibles" sont fournis, base-toi d'abord sur eux pour modifier l'existant au lieu de reinventer.
+- Si un fichier existant du workspace correspond a la tache, reutilise ce chemin.
 - Si "Code existant" est fourni, conserve tout le code non concerne intact, modifie uniquement ce qui est demande et reutilise le meme chemin de fichier.
 - Si du code est requis, fournis-le dans `files` avec le contenu COMPLET des fichiers.
 - Si aucun fichier n'est fourni, la reponse sera consideree comme un ECHEC.

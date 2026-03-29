@@ -658,6 +658,16 @@ export function buildHtml(webview: vscode.Webview): string {
                   <span class="toggle-slider" aria-hidden="true"></span>
                   <span class="toggle-label">Recherche Web</span>
                 </label>
+                <label class="toggle" id="memoryToggle" title="Activer la memoire serveur pour cette discussion">
+                  <input type="checkbox" id="memoryCheckbox" checked />
+                  <span class="toggle-slider" aria-hidden="true"></span>
+                  <span class="toggle-label">Memoire</span>
+                </label>
+                <label class="toggle" id="providerToggle" title="Basculer vers NVIDIA Build">
+                  <input type="checkbox" id="providerCheckbox" />
+                  <span class="toggle-slider" aria-hidden="true"></span>
+                  <span class="toggle-label">NVIDIA Build</span>
+                </label>
                 <button class="ghost-btn" id="addBtn" title="Nouvelle demande">Nouvelle demande</button>
                 <button class="ghost-btn" id="fileBtn" title="Ajouter des fichiers au contexte">Ajouter des fichiers</button>
               </div>
@@ -722,6 +732,8 @@ export function buildHtml(webview: vscode.Webview): string {
             const historyList = document.getElementById('historyList');
             const searchCheckbox = document.getElementById('searchCheckbox');
             const optimizeCheckbox = document.getElementById('optimizeCheckbox');
+            const memoryCheckbox = document.getElementById('memoryCheckbox');
+            const providerCheckbox = document.getElementById('providerCheckbox');
 
             const state = {
               history: [],
@@ -732,6 +744,8 @@ export function buildHtml(webview: vscode.Webview): string {
               currentSessionId: undefined,
               enableSearch: false,
               enableOptimize: true,
+              useMemory: true,
+              provider: 'ollama',
             };
 
             const MAX_HEIGHT = 500;
@@ -788,6 +802,8 @@ export function buildHtml(webview: vscode.Webview): string {
                   currentSessionId: state.currentSessionId,
                   enableSearch: state.enableSearch,
                   enableOptimize: state.enableOptimize,
+                  useMemory: state.useMemory,
+                  provider: state.provider,
                 });
               } catch {
                 // Si setState n'est pas disponible, on ignore.
@@ -813,6 +829,12 @@ export function buildHtml(webview: vscode.Webview): string {
                 }
                 if (typeof saved.enableOptimize === 'boolean') {
                   state.enableOptimize = saved.enableOptimize;
+                }
+                if (typeof saved.useMemory === 'boolean') {
+                  state.useMemory = saved.useMemory;
+                }
+                if (saved.provider === 'nvidia' || saved.provider === 'ollama') {
+                  state.provider = saved.provider;
                 }
               } catch {
                 // Pas de state persiste, on garde les valeurs par defaut.
@@ -987,13 +1009,24 @@ export function buildHtml(webview: vscode.Webview): string {
               memoryStatus.className = 'pill secondary';
               const memDot = document.createElement('span');
               memDot.className = 'pill-dot';
-              const memActive = Boolean(run._memoryActive);
+              const memActive = Boolean(run.memory_active);
               memDot.style.background = memActive ? 'var(--accent)' : '#6b7280';
               const memLabel = document.createElement('span');
               memLabel.textContent = memActive ? 'Memoire active' : 'Memoire inactive';
               memoryStatus.appendChild(memDot);
               memoryStatus.appendChild(memLabel);
               header.appendChild(memoryStatus);
+
+              const providerStatus = document.createElement('div');
+              providerStatus.className = 'pill secondary';
+              const providerDot = document.createElement('span');
+              providerDot.className = 'pill-dot';
+              providerDot.style.background = run.provider === 'nvidia' ? 'var(--button)' : '#9ca3af';
+              const providerLabel = document.createElement('span');
+              providerLabel.textContent = run.provider === 'nvidia' ? 'NVIDIA Build' : 'Ollama';
+              providerStatus.appendChild(providerDot);
+              providerStatus.appendChild(providerLabel);
+              header.appendChild(providerStatus);
 
               wrap.appendChild(header);
 
@@ -1027,6 +1060,31 @@ export function buildHtml(webview: vscode.Webview): string {
                 wrap.appendChild(ctxUsed);
               }
 
+              if (run.workspace_root) {
+                const workspaceBlock = document.createElement('div');
+                workspaceBlock.className = 'context-block';
+                workspaceBlock.textContent = 'Workspace local:\n' + run.workspace_root;
+                wrap.appendChild(workspaceBlock);
+              }
+
+              if (run.workspace_context) {
+                const workspaceContext = document.createElement('div');
+                workspaceContext.className = 'context-block';
+                workspaceContext.textContent = 'Recherche locale utilisee:\n' + run.workspace_context;
+                wrap.appendChild(workspaceContext);
+              }
+
+              if (run.applied_changes) {
+                const applied = document.createElement('div');
+                applied.className = 'context-block';
+                const files = Array.isArray(run.applied_files) ? run.applied_files.join('\n') : '';
+                const errors = Array.isArray(run.apply_errors) && run.apply_errors.length
+                  ? '\n\nErreurs:\n' + run.apply_errors.join('\n')
+                  : '';
+                applied.textContent = 'Patchs appliques sur disque:\n' + (files || 'Aucun fichier') + errors;
+                wrap.appendChild(applied);
+              }
+
               if (run.memory_context) {
                 const mem = document.createElement('div');
                 mem.className = 'context-block';
@@ -1040,8 +1098,7 @@ export function buildHtml(webview: vscode.Webview): string {
             function buildAssistantPayload(data) {
               const parsed = tryParseJson(data);
               if (isRunResponse(parsed)) {
-                const memActive = Boolean(state.currentSessionId) || state.history.length > 1;
-                const rich = renderRunResponse({ ...parsed, _memoryActive: memActive });
+                const rich = renderRunResponse(parsed);
                 return { text: JSON.stringify(parsed, null, 2), rich };
               }
 
@@ -1091,6 +1148,16 @@ export function buildHtml(webview: vscode.Webview): string {
             function renderSearchToggle() {
               if (!searchCheckbox) return;
               searchCheckbox.checked = !!state.enableSearch;
+            }
+
+            function renderMemoryToggle() {
+              if (!memoryCheckbox) return;
+              memoryCheckbox.checked = !!state.useMemory;
+            }
+
+            function renderProviderToggle() {
+              if (!providerCheckbox) return;
+              providerCheckbox.checked = state.provider === 'nvidia';
             }
 
             function shortenPath(filepath) {
@@ -1318,7 +1385,15 @@ export function buildHtml(webview: vscode.Webview): string {
             }
 
             function deleteSession(sessionId) {
-              vscode.postMessage({ type: 'deleteMemoryEntry', id: sessionId });
+              state.sessions = (state.sessions || []).filter((session) => String(session.id) !== String(sessionId));
+              if (state.currentSessionId === sessionId) {
+                state.currentSessionId = undefined;
+                state.history = [];
+              }
+              persistState();
+              renderSessionList();
+              renderHistory();
+              setStatus('Discussion supprimee.');
             }
 
             function handleFilesMessage(message) {
@@ -1373,7 +1448,11 @@ export function buildHtml(webview: vscode.Webview): string {
               const history = buildConversationHistory();
               renderHistory();
               setLoading(true);
-              setStatus('Envoi (memoire active)...', 'busy');
+              const providerLabel = state.provider === 'nvidia' ? 'NVIDIA Build' : 'Ollama';
+              setStatus(
+                (state.useMemory ? 'Envoi' : 'Envoi sans memoire') + ' via ' + providerLabel + '...',
+                'busy'
+              );
 
               vscode.postMessage({
                 type: 'ask',
@@ -1383,6 +1462,8 @@ export function buildHtml(webview: vscode.Webview): string {
                 sessionId: state.currentSessionId,
                 enableSearch: !!state.enableSearch,
                 enableOptimize: !!state.enableOptimize,
+                useMemory: !!state.useMemory,
+                provider: state.provider,
               });
               promptEl.value = '';
               autoResize(promptEl);
@@ -1444,6 +1525,18 @@ export function buildHtml(webview: vscode.Webview): string {
               setStatus(state.enableSearch ? 'Recherche web activee.' : 'Recherche web desactivee.');
             });
 
+            memoryCheckbox?.addEventListener('change', () => {
+              state.useMemory = !!memoryCheckbox.checked;
+              persistState();
+              setStatus(state.useMemory ? 'Memoire activee.' : 'Memoire desactivee.');
+            });
+
+            providerCheckbox?.addEventListener('change', () => {
+              state.provider = providerCheckbox.checked ? 'nvidia' : 'ollama';
+              persistState();
+              setStatus(state.provider === 'nvidia' ? 'Provider NVIDIA active.' : 'Provider Ollama actif.');
+            });
+
             fileBtn?.addEventListener('click', () => {
               setStatus('Choisissez des fichiers dans le workspace...');
               vscode.postMessage({ type: 'pickFiles' });
@@ -1477,58 +1570,20 @@ export function buildHtml(webview: vscode.Webview): string {
                 return;
               }
 
-              if (msg.type === 'history') {
-                if (msg.ok && Array.isArray(msg.data)) {
-                  const count = msg.data.length;
-                  const sessions = msg.data.map((entry) => ({
-                    id: String(entry.id || entry.timestamp || Date.now()),
-                    title: entry.notes || entry.goal || 'Discussion',
-                    createdAt: Number(entry.timestamp) ? Number(entry.timestamp) * 1000 : Date.now(),
-                    messages: [
-                      {
-                        kind: 'assistant',
-                        text: entry.response || entry.notes || '',
-                      },
-                    ],
-                  }));
-                  state.sessions = sessions;
-                  renderSessionList();
-                  setStatus(count ? 'Discussions chargees (' + count + ').' : 'Aucune discussion trouvee dans la memoire.');
-                } else {
-                  setStatus('Impossible de charger la memoire: ' + (msg.data || 'erreur'), 'error');
-                }
-                return;
-              }
-
-              if (msg.type === 'deleteMemoryEntry') {
-                if (msg.ok) {
-                  const sessionId = String(msg.id || '');
-                  state.sessions = (state.sessions || []).filter((s) => String(s.id) !== sessionId);
-                  if (state.currentSessionId === sessionId) {
-                    state.currentSessionId = undefined;
-                  }
-                  renderSessionList();
-                  persistState();
-                  setStatus('Discussion supprimee.');
-                } else {
-                  setStatus('Suppression memoire echouee: ' + (msg.data || 'erreur'), 'error');
-                }
-                return;
-              }
-
               if (msg.type === 'response') {
                 handleResponseMessage(msg);
               }
             });
 
             hydrateState();
-            vscode.postMessage({ type: 'loadHistory' });
             setStatus('Pret');
             renderHistory();
             renderContext();
             renderSessionList();
             renderOptimizeToggle();
             renderSearchToggle();
+            renderMemoryToggle();
+            renderProviderToggle();
           });
         </script>
       </body>

@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import uuid
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Deque, Dict, List, Sequence, Tuple
@@ -27,6 +28,7 @@ class MemoryEntry:
     constraints: str
     notes: str
     response: str
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
     history: List[ConversationTurn] = field(default_factory=list)
     timestamp: float = field(default_factory=lambda: time.time())
     conversation_id: str = "global"
@@ -105,7 +107,18 @@ class MemoryStore:
         scored: List[Tuple[int, float, MemoryEntry]] = []
 
         for entry in self.long_term_by_session.get(session_id, []):
-            haystack = (entry.response or "").lower()
+            haystack = " ".join(
+                part
+                for part in [
+                    entry.goal,
+                    entry.context,
+                    entry.constraints,
+                    entry.notes,
+                    entry.response,
+                    " ".join(turn.content for turn in entry.history),
+                ]
+                if part
+            ).lower()
             if not haystack:
                 continue
             score = sum(1 for token in query_tokens if token in haystack)
@@ -139,18 +152,28 @@ class MemoryStore:
         conversation_id: str | None = None,
     ) -> None:
         """
-        Persist uniquement la reponse finale retournee a l'utilisateur.
+        Persist a compact but meaningful memory entry for later retrieval.
         """
         trimmed_response = _trim_text(response or "", 1200)
         if not trimmed_response:
             return
+        recommendations = final_critic.get("recommendations") if isinstance(final_critic, dict) else []
+        problems = final_critic.get("problems") if isinstance(final_critic, dict) else []
+        highlights = recommendations[:2] if isinstance(recommendations, list) and recommendations else problems[:2]
+        score = final_critic.get("score") if isinstance(final_critic, dict) else None
+        notes_parts = [
+            f"Score critique: {score}" if score is not None else "",
+            f"Taches terminees: {len(tasks)}",
+            f"Taches non resolues: {len(unresolved)}" if unresolved else "",
+            "; ".join(str(item) for item in highlights if item),
+        ]
         self.remember(
-            goal="",
-            context="",
-            constraints="",
-            notes="",
+            goal=goal,
+            context=context_used or context,
+            constraints=constraints,
+            notes=" | ".join(part for part in notes_parts if part),
             response=trimmed_response,
-            history=[],
+            history=self._normalize_history(history or []),
             conversation_id=conversation_id,
         )
 
@@ -190,11 +213,11 @@ class MemoryStore:
         return entries
 
     def delete_entry(self, entry_id: str) -> bool:
-        """Delete an entry by its timestamp identifier across sessions. Returns True if removed."""
+        """Delete an entry by id across sessions. Returns True if removed."""
         removed = False
         for session_id, entries in list(self.long_term_by_session.items()):
             before = len(entries)
-            entries[:] = [e for e in entries if str(e.timestamp) != str(entry_id)]
+            entries[:] = [e for e in entries if str(e.id) != str(entry_id) and str(e.timestamp) != str(entry_id)]
             if len(entries) != before:
                 removed = True
                 self._sync_session_buffers(session_id)
@@ -211,8 +234,10 @@ class MemoryStore:
         for entry in entries:
             if not entry.response:
                 continue
+            title = f"Objectif precedent: {entry.goal}" if entry.goal else "Reponse precedente"
             preview = _trim_text(entry.response, 400)
-            lines.append(f"- Reponse precedente:\n  {preview}")
+            note_line = f"\n  Notes: {entry.notes}" if entry.notes else ""
+            lines.append(f"- {title}:{note_line}\n  {preview}")
         if not lines:
             return ""
         formatted = "\n".join(lines)
@@ -284,6 +309,7 @@ class MemoryStore:
                     constraints=str(item.get("constraints", "")),
                     notes=notes,
                     response=str(item.get("response", "")),
+                    id=str(item.get("id") or uuid.uuid4().hex),
                     history=history,
                     timestamp=float(item.get("timestamp", time.time())),
                     conversation_id=conversation_id,

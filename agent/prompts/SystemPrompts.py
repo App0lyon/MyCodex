@@ -26,6 +26,7 @@ Interdictions strictes :
 
 Contraintes generales :
 - Chaque tache doit etre executable independamment et re-utiliser le contexte pertinent quand il apporte des precisions.
+- Le contexte peut inclure des chemins de fichiers et des extraits trouves par recherche dans le workspace local ; sers-t'en pour nommer les vrais modules/fichiers.
 - Les taches doivent etre atomiques mais pas microscopiques.
 - Les dependances doivent uniquement lier les taches qui consomment le resultat d'une tache precedente.
 - Utilise un raisonnement technique rigoureux.
@@ -52,6 +53,7 @@ REGLE ABSOLUE DE SORTIE :
 CONTRAINTES :
 - Respecte strictement la tache fournie.
 - N'implemente rien hors perimetre.
+- Si le contexte contient des fichiers existants du workspace, aligne-toi dessus plutot que d'inventer une structure.
 - Le code doit etre correct, lisible et complet.
 - Le code DOIT etre place uniquement dans `files[].content`.
 - Si la tache implique du code, au moins un fichier avec le code complet est OBLIGATOIRE.

@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import { Transport } from './types';
 
 type ConversationTurn = { role: string; content: string };
+export type Provider = 'ollama' | 'nvidia';
 export type MemoryEntry = {
 	id: string;
 	goal: string;
@@ -23,7 +24,9 @@ export async function callBackend(
 	history: ConversationTurn[] = [],
 	sessionId?: string,
 	enableSearch = false,
-	enableOptimize = true
+	enableOptimize = true,
+	useMemory = true,
+	provider: Provider = 'ollama'
 ): Promise<unknown> {
 	const config = vscode.workspace.getConfiguration('mycodex');
 	const transport = (config.get<string>('transport', 'http') as Transport) || 'http';
@@ -34,6 +37,7 @@ export async function callBackend(
 		.join('\n\n')
 		.trim();
 	const contextForTransport = transport === 'cli' ? combinedContext : rawContext;
+	const workspaceRoot = detectWorkspaceRoot();
 
 	if (transport === 'cli') {
 		const cmdTemplate = config.get<string>(
@@ -41,18 +45,34 @@ export async function callBackend(
 			'python main.py --goal "{query}" --context "{context}" --constraints "" --no-verbose'
 		);
 		const cwd = resolveCliCwd(config);
-		let cmd = cmdTemplate
-			.replace('{query}', sanitizeForTemplate(prompt))
-			.replace('{context}', sanitizeForTemplate(contextForTransport));
+		const cmdParts = splitCommandLine(cmdTemplate);
+		if (!cmdParts.length) {
+			throw new Error('Commande CLI vide.');
+		}
+		const [command, ...templateArgs] = cmdParts;
+		const resolvedParts = [command, ...templateArgs].map((part) =>
+			part.split('{query}').join(prompt).split('{context}').join(contextForTransport)
+		);
+		const [resolvedCommand, ...args] = resolvedParts;
 		if (enableSearch) {
-			cmd += ' --enable-search';
+			args.push('--enable-search');
 		}
 		if (!enableOptimize) {
-			cmd += ' --disable-optimizer';
+			args.push('--disable-optimizer');
+		}
+		if (!useMemory) {
+			args.push('--disable-memory');
+		}
+		if (provider === 'nvidia') {
+			args.push('--provider', 'nvidia');
+		}
+		if (workspaceRoot) {
+			args.push('--workspace-root', workspaceRoot);
+			args.push('--apply-changes');
 		}
 
 		return new Promise<string>((resolve, reject) => {
-			const proc = cp.spawn(cmd, { shell: true, cwd });
+			const proc = cp.spawn(resolvedCommand, args, { shell: false, cwd });
 			let stdout = '';
 			let stderr = '';
 
@@ -68,19 +88,26 @@ export async function callBackend(
 		});
 	}
 
-	const baseUrl = config.get<string>('apiBaseUrl', 'http://localhost:5000/api/run');
-	const apiRoot = deriveApiRoot(baseUrl);
+	const baseUrl = deriveProviderRunUrl(
+		config.get<string>('apiBaseUrl', 'http://localhost:5000/api/run'),
+		provider
+	);
 	const payload: Record<string, unknown> = {
 		goal: prompt,
 		context: contextForTransport,
 		constraints: '',
-		use_memory: true,
+		provider,
+		use_memory: useMemory,
 		history,
 		enable_search: enableSearch,
 		optimize: enableOptimize,
 	};
 	if (sessionId) {
 		payload.session_id = sessionId;
+	}
+	if (workspaceRoot) {
+		payload.workspace_root = workspaceRoot;
+		payload.apply_changes = true;
 	}
 	const httpResult = await postJsonWithLongTimeout(baseUrl, payload);
 	if (httpResult.status < 200 || httpResult.status >= 300) {
@@ -134,8 +161,70 @@ function deriveApiRoot(runUrl: string): string {
 	return withoutTrailing;
 }
 
-function sanitizeForTemplate(value: string): string {
-	return value.replace(/"/g, '\\"');
+function deriveProviderRunUrl(runUrl: string, provider: Provider): string {
+	const withoutTrailing = runUrl.endsWith('/') ? runUrl.slice(0, -1) : runUrl;
+	if (provider !== 'nvidia') {
+		if (withoutTrailing.toLowerCase().endsWith('/run/nvidia')) {
+			return withoutTrailing.slice(0, -7);
+		}
+		return withoutTrailing;
+	}
+	if (withoutTrailing.toLowerCase().endsWith('/run/nvidia')) {
+		return withoutTrailing;
+	}
+	if (withoutTrailing.toLowerCase().endsWith('/run')) {
+		return `${withoutTrailing}/nvidia`;
+	}
+	return `${withoutTrailing}/nvidia`;
+}
+
+function splitCommandLine(commandLine: string): string[] {
+	const parts: string[] = [];
+	let current = '';
+	let quote: '"' | "'" | '' = '';
+
+	for (let index = 0; index < commandLine.length; index += 1) {
+		const char = commandLine[index];
+		if (quote) {
+			if (char === quote) {
+				quote = '';
+				continue;
+			}
+			if (char === '\\' && quote === '"' && index + 1 < commandLine.length) {
+				const next = commandLine[index + 1];
+				if (next === '"' || next === '\\') {
+					current += next;
+					index += 1;
+					continue;
+				}
+			}
+			current += char;
+			continue;
+		}
+
+		if (char === '"' || char === "'") {
+			quote = char;
+			continue;
+		}
+
+		if (/\s/.test(char)) {
+			if (current) {
+				parts.push(current);
+				current = '';
+			}
+			continue;
+		}
+
+		current += char;
+	}
+
+	if (quote) {
+		throw new Error('Commande CLI invalide: guillemet non ferme.');
+	}
+	if (current) {
+		parts.push(current);
+	}
+	return parts;
 }
 
 function buildHistoryContext(history: ConversationTurn[]): string {
@@ -180,6 +269,10 @@ function detectAgentCwd(): string | undefined {
 	}
 
 	return undefined;
+}
+
+function detectWorkspaceRoot(): string | undefined {
+	return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || undefined;
 }
 
 function resolveCliCwd(config: vscode.WorkspaceConfiguration): string {

@@ -1,6 +1,6 @@
 # MyCodex
 
-Copilote local compose d un agent Python (planner/executor/critic avec memoire et optimisation de prompt) et d une extension VS Code pour piloter l agent directement depuis l editeur.
+Copilote local compose d un agent Python (planner/executor/critic avec memoire, optimisation de prompt, recherche dans le workspace et provider NVIDIA Build optionnel) et d une extension VS Code pour piloter l agent directement depuis l editeur.
 
 ## Arborescence
 - `agent/` : backend FastAPI/CLI qui orchestre planification, execution, critique et memoire.
@@ -8,6 +8,7 @@ Copilote local compose d un agent Python (planner/executor/critic avec memoire e
 
 ## Pre-requis
 - Python 3.11+ et pip.
+- `uv` recommande pour gerer l'environnement Python du backend.
 - Node.js 18+ et npm pour l extension.
 - Ollama lance sur la machine avec les modeles : `llama3.1:8b`, `codellama:13b`, `qwen2.5`, `gemma3:4b`.
   - Commandes rappel : `ollama serve` puis `ollama pull <modele>`.
@@ -15,6 +16,13 @@ Copilote local compose d un agent Python (planner/executor/critic avec memoire e
 ## Mise en route rapide
 
 ### 1) Agent en mode API (recommande pour VS Code)
+```bash
+cd agent
+uv sync
+uv run python main.py
+```
+
+Alternative `pip` :
 ```bash
 cd agent
 pip install -r requirements.txt
@@ -29,23 +37,34 @@ python main.py
 - Healthcheck `GET /health`.
 - Endpoint principal `POST /api/run` avec corps :
 ```json
-{ "goal": "...", "context": "...", "constraints": "", "use_memory": true }
+{ "goal": "...", "context": "...", "constraints": "", "use_memory": true, "session_id": "chat-1", "workspace_root": "C:/mon-projet" }
 ```
+- Route NVIDIA Build : `POST /api/run/nvidia` avec le meme payload. Definir `NVIDIA_BUILD_API_KEY` ou `--nvidia-api-key`.
+  - Defaults NVIDIA choisis pour ce projet : `qwen/qwq-32b` (planning/review/reponse) et `qwen/qwen2.5-coder-7b-instruct` (generation/correction de code).
 - Pour desactiver l optimisation de prompt : `--disable-optimizer` ou `"optimize": false`.
-- Pour couper la memoire : `--disable-memory` ou `"use_memory": false`.
+- Pour couper la memoire : `--disable-memory` ou `"use_memory": false`. Cote API, la memoire n'est activee que si `session_id` est fourni.
+- Pour activer la recherche locale de fichiers, fournissez `workspace_root` ou utilisez l'extension VS Code depuis un workspace ouvert.
 
 ### 2) Agent en mode CLI
 ```bash
-python main.py --mode cli --goal "Ton objectif" --context "Contexte" --constraints "" --max-workers 2
+cd agent
+uv run python main.py --mode cli --provider nvidia --goal "Ton objectif" --context "Contexte" --constraints "" --max-workers 2
 ```
 - Meme flags `--disable-optimizer` et `--disable-memory` disponibles.
 
 ### 3) Optimiseur seul
 ```bash
-python main.py --mode optimize --prompt "Ton prompt brut" --context "Contexte optionnel"
+cd agent
+uv run python main.py --mode optimize --prompt "Ton prompt brut" --context "Contexte optionnel"
 ```
 
-### 4) Extension VS Code
+### 4) Tests backend avec uv
+```bash
+cd agent
+uv run --group test pytest
+```
+
+### 5) Extension VS Code
 - Dossier `vscode-extension/mycodex`.
 - Lancer le backend (API ou CLI) puis dans VS Code : Palette -> `MyCodex: Ouvrir le chat`.
 - Reglages clefs :

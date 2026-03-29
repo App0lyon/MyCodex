@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from typing import Any, Dict, List, Optional
 
 import uvicorn
@@ -23,6 +24,10 @@ DEFAULT_MAX_WORKERS = 2
 DEFAULT_API_HOST = "0.0.0.0"
 DEFAULT_API_PORT = 5000
 DEFAULT_OLLAMA_TIMEOUT = 600
+DEFAULT_PROVIDER = "ollama"
+DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+DEFAULT_NVIDIA_GENERAL_MODEL = "qwen/qwq-32b"
+DEFAULT_NVIDIA_CODE_MODEL = "qwen/qwen2.5-coder-7b-instruct"
 
 
 class MessageModel(BaseModel):
@@ -34,6 +39,9 @@ class RunPayload(BaseModel):
     goal: str = Field(..., description="Objectif global a realiser.")
     context: str = ""
     constraints: str = ""
+    workspace_root: Optional[str] = None
+    apply_changes: bool = False
+    provider: Optional[str] = None
     optimize: bool = True
     enable_search: bool = False
     search_query: Optional[str] = None
@@ -89,9 +97,16 @@ class CriticModel(BaseModel):
 class RunResponse(BaseModel):
     goal: str
     context: str
-    context_used: str = Field("", exclude=True)
-    memory_context: str = Field("", exclude=True)
+    context_used: str = ""
+    memory_context: str = ""
     scenario_id: str = ""
+    provider: str = DEFAULT_PROVIDER
+    memory_active: bool = False
+    workspace_root: str = ""
+    workspace_context: str = ""
+    applied_changes: bool = False
+    applied_files: List[str] = Field(default_factory=list)
+    apply_errors: List[str] = Field(default_factory=list)
     search_results: List[Dict[str, str]] = Field(default_factory=list)
     completed_tasks: int
     tasks: List[TaskResultModel]
@@ -107,6 +122,7 @@ class MemoryEntryModel(BaseModel):
     constraints: str
     notes: str
     response: str
+    history: List[MessageModel] = Field(default_factory=list)
     conversation_id: str
     timestamp: float
 
@@ -121,19 +137,42 @@ class OptimizeResponse(BaseModel):
     raw: str
 
 
-def build_orchestrator(config: Optional[argparse.Namespace] = None) -> Orchestrator:
+def build_orchestrator(config: Optional[argparse.Namespace] = None, provider_override: Optional[str] = None) -> Orchestrator:
     disable_memory = bool(getattr(config, "disable_memory", False))
+    provider = (provider_override or getattr(config, "provider", DEFAULT_PROVIDER) or DEFAULT_PROVIDER).strip().lower()
     memory_store = None if disable_memory else MemoryStore(path=getattr(config, "memory_path", "memory_store.json"))
+    planner_model = getattr(config, "planner_model", DEFAULT_PLANNER_MODEL)
+    executor_model = getattr(config, "executor_model", DEFAULT_EXECUTOR_MODEL)
+    critic_model = getattr(config, "critic_model", DEFAULT_CRITIC_MODEL)
+    review_model = getattr(config, "review_model", DEFAULT_REVIEW_MODEL)
+    self_correction_model = getattr(config, "self_correction_model", DEFAULT_SELF_CORRECTION_MODEL)
+    optimizer_model = getattr(config, "optimizer_model", DEFAULT_OPTIMIZER_MODEL)
+    response_model = getattr(config, "response_model", DEFAULT_RESPONSE_MODEL)
+
+    if provider == "nvidia":
+        general_model = getattr(config, "nvidia_general_model", DEFAULT_NVIDIA_GENERAL_MODEL)
+        code_model = getattr(config, "nvidia_code_model", DEFAULT_NVIDIA_CODE_MODEL)
+        planner_model = general_model
+        executor_model = code_model
+        critic_model = general_model
+        review_model = general_model
+        self_correction_model = code_model
+        optimizer_model = general_model
+        response_model = general_model
+
     orchestrator = Orchestrator(
+        provider=provider,
         ollama_base_url=getattr(config, "ollama_url", DEFAULT_OLLAMA_URL),
-        planner_model=getattr(config, "planner_model", DEFAULT_PLANNER_MODEL),
-        executor_model=getattr(config, "executor_model", DEFAULT_EXECUTOR_MODEL),
-        critic_model=getattr(config, "critic_model", DEFAULT_CRITIC_MODEL),
-        review_model=getattr(config, "review_model", DEFAULT_REVIEW_MODEL),
-        self_correction_model=getattr(config, "self_correction_model", DEFAULT_SELF_CORRECTION_MODEL),
-        optimizer_model=getattr(config, "optimizer_model", DEFAULT_OPTIMIZER_MODEL),
+        nvidia_api_key=getattr(config, "nvidia_api_key", None) or os.getenv("NVIDIA_BUILD_API_KEY"),
+        nvidia_base_url=getattr(config, "nvidia_base_url", DEFAULT_NVIDIA_BASE_URL),
+        planner_model=planner_model,
+        executor_model=executor_model,
+        critic_model=critic_model,
+        review_model=review_model,
+        self_correction_model=self_correction_model,
+        optimizer_model=optimizer_model,
         optimizer_enabled=not bool(getattr(config, "disable_optimizer", False)),
-        response_model=getattr(config, "response_model", DEFAULT_RESPONSE_MODEL),
+        response_model=response_model,
         max_workers=max(1, int(getattr(config, "max_workers", DEFAULT_MAX_WORKERS))),
         verbose=not bool(getattr(config, "no_verbose", False)),
         memory_store=memory_store,
@@ -162,14 +201,26 @@ def create_app(orchestrator: Optional[Orchestrator] = None) -> FastAPI:
     )
 
     app.state.orchestrator = orchestrator or build_orchestrator()
+    app.state.nvidia_orchestrator = None
+
+    def get_provider_orchestrator(provider: str) -> Orchestrator:
+        selected = (provider or DEFAULT_PROVIDER).strip().lower() or DEFAULT_PROVIDER
+        if selected == "nvidia":
+            current = getattr(app.state, "nvidia_orchestrator", None)
+            if current is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Orchestrateur NVIDIA indisponible. Configurez NVIDIA_BUILD_API_KEY ou --nvidia-api-key.",
+                )
+            return current
+        return app.state.orchestrator
 
     @app.get("/health")
     async def health() -> Dict[str, str]:
         return {"status": "ok"}
 
-    @app.post("/api/run", response_model=RunResponse)
-    async def run_endpoint(payload: RunPayload) -> RunResponse:
-        current = app.state.orchestrator
+    async def _run_with_provider(payload: RunPayload, provider: str) -> RunResponse:
+        current = get_provider_orchestrator(provider)
         goal_to_use = payload.goal
         scenario_id = payload.scenario_id or payload.session_id or "default"
         # Optimize when requested; frontend sends prior history so we no longer block on history length.
@@ -202,11 +253,22 @@ def create_app(orchestrator: Optional[Orchestrator] = None) -> FastAPI:
                 payload.session_id,
                 payload.enable_search,
                 payload.search_query,
+                payload.workspace_root,
+                payload.apply_changes,
                 scenario_id=scenario_id,
             )
             return RunResponse(**result)
         except Exception as exc:  # pragma: no cover - API safety
             raise HTTPException(status_code=500, detail=f"Echec de l'agent: {exc}") from exc
+
+    @app.post("/api/run", response_model=RunResponse)
+    async def run_endpoint(payload: RunPayload) -> RunResponse:
+        requested_provider = payload.provider or DEFAULT_PROVIDER
+        return await _run_with_provider(payload, requested_provider)
+
+    @app.post("/api/run/nvidia", response_model=RunResponse)
+    async def run_nvidia_endpoint(payload: RunPayload) -> RunResponse:
+        return await _run_with_provider(payload, "nvidia")
 
     @app.get("/api/memory", response_model=List[MemoryEntryModel])
     async def list_memory(conversation_id: Optional[str] = None) -> List[MemoryEntryModel]:
@@ -216,12 +278,13 @@ def create_app(orchestrator: Optional[Orchestrator] = None) -> FastAPI:
         entries = current.memory.list_entries(conversation_id)
         return [
             MemoryEntryModel(
-                id=str(entry.timestamp),
+                id=entry.id,
                 goal=entry.goal,
                 context=entry.context,
                 constraints=entry.constraints,
                 notes=entry.notes,
                 response=entry.response,
+                history=[MessageModel(role=turn.role, content=turn.content) for turn in entry.history],
                 conversation_id=entry.conversation_id,
                 timestamp=entry.timestamp,
             )
@@ -238,9 +301,8 @@ def create_app(orchestrator: Optional[Orchestrator] = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Entree non trouvee.")
         return {"ok": True}
 
-    @app.post("/api/optimize", response_model=OptimizeResponse)
-    async def optimize_endpoint(payload: OptimizePayload) -> OptimizeResponse:
-        current = app.state.orchestrator
+    async def _optimize_with_provider(payload: OptimizePayload, provider: str) -> OptimizeResponse:
+        current = get_provider_orchestrator(provider)
         if not current.optimizer_enabled:
             raise HTTPException(status_code=400, detail="L'optimisation de prompt est desactivee sur ce serveur.")
         try:
@@ -252,6 +314,14 @@ def create_app(orchestrator: Optional[Orchestrator] = None) -> FastAPI:
             return OptimizeResponse(**result)
         except Exception as exc:  # pragma: no cover - API safety
             raise HTTPException(status_code=500, detail=f"Echec de l'optimizer: {exc}") from exc
+
+    @app.post("/api/optimize", response_model=OptimizeResponse)
+    async def optimize_endpoint(payload: OptimizePayload) -> OptimizeResponse:
+        return await _optimize_with_provider(payload, DEFAULT_PROVIDER)
+
+    @app.post("/api/optimize/nvidia", response_model=OptimizeResponse)
+    async def optimize_nvidia_endpoint(payload: OptimizePayload) -> OptimizeResponse:
+        return await _optimize_with_provider(payload, "nvidia")
 
     return app
 
@@ -267,13 +337,29 @@ def parse_args() -> argparse.Namespace:
         default="api",
         help="api = lance le serveur FastAPI (defaut), cli = execution unique, optimize = optimise un prompt unique.",
     )
+    parser.add_argument(
+        "--provider",
+        choices=["ollama", "nvidia"],
+        default=DEFAULT_PROVIDER,
+        help="Backend de modele a utiliser: ollama (defaut) ou nvidia.",
+    )
     parser.add_argument("--host", default=DEFAULT_API_HOST, help="Adresse d'ecoute du serveur FastAPI.")
     parser.add_argument("--port", type=int, default=DEFAULT_API_PORT, help="Port d'ecoute du serveur FastAPI.")
     parser.add_argument("--reload", action="store_true", help="Active le rechargement auto (dev uniquement).")
     parser.add_argument("--goal", help="Objectif global a realiser (mode CLI).")
     parser.add_argument("--context", default="", help="Contexte technique ou notes supplementaires.")
     parser.add_argument("--constraints", default="", help="Contraintes supplementaires a transmettre a l'executor.")
+    parser.add_argument("--workspace-root", default=None, help="Racine du workspace local a indexer pour la recherche de fichiers.")
+    parser.add_argument(
+        "--apply-changes",
+        action="store_true",
+        help="Applique les fichiers generes directement sur disque dans le workspace racine.",
+    )
     parser.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL, help="URL de base du serveur Ollama.")
+    parser.add_argument("--nvidia-api-key", default=None, help="Cle API NVIDIA Build. Peut aussi venir de NVIDIA_BUILD_API_KEY.")
+    parser.add_argument("--nvidia-base-url", default=DEFAULT_NVIDIA_BASE_URL, help="Base URL OpenAI-compatible NVIDIA Build.")
+    parser.add_argument("--nvidia-general-model", default=DEFAULT_NVIDIA_GENERAL_MODEL, help="Modele NVIDIA generaliste/reasoning.")
+    parser.add_argument("--nvidia-code-model", default=DEFAULT_NVIDIA_CODE_MODEL, help="Modele NVIDIA focalise code.")
     parser.add_argument(
         "--ollama-timeout",
         type=int,
@@ -365,6 +451,8 @@ def main() -> None:
             conversation_id="cli",
             enable_search=bool(getattr(args, "enable_search", False)),
             search_query=None,
+            workspace_root=args.workspace_root,
+            apply_changes=bool(getattr(args, "apply_changes", False)),
             scenario_id=scenario_id,
         )
         if isinstance(result, dict) and result.get("response"):
@@ -413,7 +501,11 @@ def main() -> None:
         print(optimized["optimized_prompt"])
         return
 
-    app.state.orchestrator = build_orchestrator(args)
+    app.state.orchestrator = build_orchestrator(args, provider_override="ollama")
+    try:
+        app.state.nvidia_orchestrator = build_orchestrator(args, provider_override="nvidia")
+    except Exception:
+        app.state.nvidia_orchestrator = None
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
 
 
